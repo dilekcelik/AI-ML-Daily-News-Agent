@@ -1,0 +1,180 @@
+import requests
+import feedparser
+from datetime import datetime, timezone
+from urllib.parse import quote_plus
+
+# ==========================
+# CONFIGURATION
+# ==========================
+
+KEYWORDS = [
+    "artificial intelligence", "ai ", " ai,", " ai.", "machine learning",
+    "deep learning", "neural network", "neural networks", "large language model",
+    "llm", "transformer model", "genai", "generative ai"
+]
+MAX_ARTICLES = 15  # how many to list
+
+GOOGLE_NEWS_QUERY = "artificial intelligence OR machine learning"
+REDDIT_SUBS = ["MachineLearning", "artificial"]
+HN_SEARCH_QUERY = "artificial intelligence OR machine learning"
+
+
+# ==========================
+# HELPER FUNCTIONS (same as before)
+# ==========================
+
+def contains_keyword(text: str) -> bool:
+    if not text:
+        return False
+    text_lower = text.lower()
+    return any(k in text_lower for k in KEYWORDS)
+
+
+def fetch_google_news():
+    q = quote_plus(GOOGLE_NEWS_QUERY)
+    url = f"https://news.google.com/rss/search?q={q}&hl=en-GB&gl=GB&ceid=GB:en"
+    feed = feedparser.parse(url)
+
+    articles = []
+    for entry in feed.entries[:30]:
+        title = entry.get("title", "")
+        summary = entry.get("summary", "")
+        link = entry.get("link", "")
+        published = entry.get("published", "")
+        if not contains_keyword(title + " " + summary):
+            continue
+        articles.append({
+            "title": title,
+            "summary": summary,
+            "url": link,
+            "source": "Google News",
+            "score": 1,
+            "published": published
+        })
+    return articles
+
+
+def fetch_reddit():
+    headers = {"User-Agent": "ai-news-bot/0.1"}
+    articles = []
+    for sub in REDDIT_SUBS:
+        url = f"https://www.reddit.com/r/{sub}/hot.json?limit=25"
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            continue
+
+        for post in data.get("data", {}).get("children", []):
+            p = post.get("data", {})
+            title = p.get("title", "")
+            selftext = p.get("selftext", "")
+            ups = p.get("ups", 0)
+            permalink = p.get("permalink", "")
+            created_utc = p.get("created_utc", None)
+
+            if not contains_keyword(title + " " + selftext):
+                continue
+
+            url_post = "https://www.reddit.com" + permalink
+            published = None
+            if created_utc:
+                published = datetime.fromtimestamp(created_utc, tz=timezone.utc).isoformat()
+
+            articles.append({
+                "title": title,
+                "summary": (selftext[:300] + "...") if len(selftext) > 300 else selftext,
+                "url": url_post,
+                "source": f"Reddit r/{sub}",
+                "score": ups + 2,
+                "published": published
+            })
+    return articles
+
+
+def fetch_hacker_news():
+    url = "https://hn.algolia.com/api/v1/search"
+    params = {
+        "query": HN_SEARCH_QUERY,
+        "tags": "story",
+        "hitsPerPage": 30
+    }
+    articles = []
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return articles
+
+    for hit in data.get("hits", []):
+        title = hit.get("title", "")
+        url_story = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
+        points = hit.get("points", 0)
+        created_at = hit.get("created_at", "")
+
+        if not contains_keyword(title):
+            continue
+
+        articles.append({
+            "title": title,
+            "summary": "",
+            "url": url_story,
+            "source": "Hacker News",
+            "score": points + 3,
+            "published": created_at
+        })
+    return articles
+
+
+def deduplicate_articles(articles):
+    seen_urls = set()
+    seen_titles = set()
+    unique = []
+    for a in articles:
+        url = a.get("url", "")
+        title = a.get("title", "")
+        key_url = url.strip().lower()
+        key_title = title.strip().lower()
+        if key_url in seen_urls or key_title in seen_titles:
+            continue
+        seen_urls.add(key_url)
+        seen_titles.add(key_title)
+        unique.append(a)
+    return unique
+
+
+def sort_articles(articles):
+    return sorted(articles, key=lambda x: x.get("score", 0), reverse=True)
+
+
+def print_articles(articles):
+    if not articles:
+        print("No AI/ML news found at the moment.")
+        return
+    print("=== Daily AI & ML News Digest ===\n")
+    for idx, a in enumerate(articles, start=1):
+        print(f"{idx}. [{a.get('source')}] {a.get('title')}")
+        print(f"   URL: {a.get('url')}")
+        if a.get("published"):
+            print(f"   Published: {a.get('published')}")
+        if a.get("summary"):
+            print(f"   Summary: {a.get('summary')[:200]}{'...' if len(a.get('summary'))>200 else ''}")
+        print()
+
+def main():
+    google = fetch_google_news()
+    reddit = fetch_reddit()
+    hn = fetch_hacker_news()
+
+    all_articles = google + reddit + hn
+    all_articles = deduplicate_articles(all_articles)
+    all_articles = sort_articles(all_articles)
+    top = all_articles[:MAX_ARTICLES]
+
+    print_articles(top)
+
+
+if __name__ == "__main__":
+    main()
